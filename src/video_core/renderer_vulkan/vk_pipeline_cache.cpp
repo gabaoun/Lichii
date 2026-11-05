@@ -862,10 +862,26 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
+    // This fork's files: its records carry task/mesh state other builds of the same cache version
+    // cannot read, and their loader deletes a file it fails to read. The shared files of earlier
+    // builds are copied once.
     pipeline_cache_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti", CACHE_VERSION);
     used_pipelines_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti", CACHE_VERSION);
+    for (const auto& [shared, own] :
+         {std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION),
+                    pipeline_cache_filename},
+          std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION),
+                    used_pipelines_filename}}) {
+        std::error_code error;
+        if (!std::filesystem::exists(own, error) && std::filesystem::exists(shared, error)) {
+            std::filesystem::copy_file(shared, own, error);
+            LOG_INFO(Render_Vulkan, "Copied pipeline cache {} to {}{}",
+                     Common::FS::PathToUTF8String(shared), Common::FS::PathToUTF8String(own),
+                     error ? fmt::format(" (failed: {})", error.message()) : std::string{});
+        }
+    }
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
