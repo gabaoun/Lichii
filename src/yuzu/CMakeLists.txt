@@ -15,6 +15,7 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(yuzu
+    msvc_compat.cpp
     Info.plist
     about_dialog.cpp
     about_dialog.h
