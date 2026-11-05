@@ -708,9 +708,17 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     const GPUVAddr end_page = (address + size + 0xfff) & ~GPUVAddr{0xfff};
     const bool dirty = memory_manager.IsMemoryDirty(first_page, end_page - first_page,
                                                     VideoCommon::CacheType::BufferCache);
+    static const bool list_cpu_sync = [] {
+        const char* value = std::getenv("EDEN_NX2_LIST_CPU_SYNC");
+        return value == nullptr || value[0] != '0';
+    }();
     if (dirty) {
         VideoCommon::GpuSplit::Get().Run(
-            [memory = &memory_manager, first_page, size = end_page - first_page] {
+            [rasterizer = rasterizer, memory = &memory_manager, first_page,
+             size = end_page - first_page] {
+                if (list_cpu_sync && rasterizer != nullptr) {
+                    rasterizer->InvalidateGPUCache();
+                }
                 memory->FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
             },
             VideoCommon::DrainSite::ListFlush);
