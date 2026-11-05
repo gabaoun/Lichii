@@ -143,7 +143,7 @@ if (MSVC AND NOT CXX_CLANG)
     endif()
 
     if (ARCHITECTURE_x86_64)
-        add_compile_options(/QIntel-jcc-erratum)
+        add_compile_options(/QIntel-jcc-erratum /arch:AVX2)
     endif()
 
     set(CMAKE_EXE_LINKER_FLAGS_DEBUG   "/DEBUG /MANIFEST:NO" CACHE STRING "" FORCE)
