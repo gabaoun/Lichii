@@ -432,6 +432,23 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
         return;
     }
+    // EDEN_NX2_SKIP_HASH=<hex>[,<hex>...]: drop draws by pipeline shader hash (stable across
+    // runs, unlike program addresses; debug aid / ground mist fix).
+    static const std::vector<u64> skip_hashes = [] {
+        std::vector<u64> list;
+        if (const char* value = std::getenv("EDEN_NX2_SKIP_HASH")) {
+            for (char* end = nullptr; *value; value = *end ? end + 1 : end) {
+                list.push_back(std::strtoull(value, &end, 16));
+                if (end == value) break;
+            }
+        }
+        return list;
+    }();
+    for (const u64 hash : pipeline->ShaderHashes()) {
+        if (hash != 0 && std::ranges::find(skip_hashes, hash) != skip_hashes.end()) {
+            return;
+        }
+    }
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
     // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
