@@ -7,6 +7,23 @@
 # Enable modules to include each other's files
 include_directories(.)
 
+set(LICHII_PGO "OFF" CACHE STRING "MSVC PGO mode: OFF, GEN, or USE")
+if (MSVC AND NOT CXX_CLANG AND ARCHITECTURE_x86_64)
+    add_compile_options(
+        /arch:AVX2
+        $<$<CONFIG:Release>:/Ob3>
+        $<$<CONFIG:Release>:/Oi>
+        $<$<CONFIG:Release>:/Ot>
+        $<$<CONFIG:Release>:/Gw>
+    )
+    if (LICHII_PGO STREQUAL "GEN" OR LICHII_PGO STREQUAL "USE")
+        add_compile_options($<$<CONFIG:Release>:/GL>)
+        set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "/LTCG" CACHE STRING "" FORCE)
+    else()
+        set(CMAKE_STATIC_LINKER_FLAGS_RELEASE "" CACHE STRING "" FORCE)
+    endif()
+endif()
+
 # Dynarmic
 if ((ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64 OR ARCHITECTURE_riscv64 OR ARCHITECTURE_loongarch64) AND NOT YUZU_STATIC_ROOM)
     add_subdirectory(dynarmic)
@@ -143,11 +160,17 @@ if (MSVC AND NOT CXX_CLANG)
     endif()
 
     if (ARCHITECTURE_x86_64)
-        add_compile_options(/QIntel-jcc-erratum /arch:AVX2)
+        add_compile_options(/arch:AVX2)
     endif()
 
     set(CMAKE_EXE_LINKER_FLAGS_DEBUG   "/DEBUG /MANIFEST:NO" CACHE STRING "" FORCE)
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /MANIFEST:NO /INCREMENTAL:NO /OPT:REF,ICF" CACHE STRING "" FORCE)
+    if (LICHII_PGO STREQUAL "GEN")
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /MANIFEST:NO /INCREMENTAL:NO /OPT:REF,ICF /LTCG /GENPROFILE:PGD=${CMAKE_BINARY_DIR}/bin/lichii.pgd" CACHE STRING "" FORCE)
+    elseif (LICHII_PGO STREQUAL "USE")
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /MANIFEST:NO /INCREMENTAL:NO /OPT:REF,ICF /LTCG /USEPROFILE:PGD=${CMAKE_BINARY_DIR}/bin/lichii.pgd" CACHE STRING "" FORCE)
+    else()
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/DEBUG /MANIFEST:NO /INCREMENTAL:NO /OPT:REF,ICF" CACHE STRING "" FORCE)
+    endif()
 else()
     if (NOT MSVC)
         add_compile_options(

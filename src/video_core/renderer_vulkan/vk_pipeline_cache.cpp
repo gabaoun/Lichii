@@ -1204,6 +1204,13 @@ void PipelineCache::TickFrame() {
 }
 
 void PipelineCache::EvictUnusedPipelines() {
+    static const bool evict_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_EVICT_PIPELINES");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!evict_enabled) {
+        return;
+    }
     // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
     // 2-3 ms below, so none are evicted there.
     if (device.IsMoltenVK()) {
@@ -1273,11 +1280,15 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    static const bool discard_native = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
+        return value == nullptr || value[0] != '0';
+    }();
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool discard = CanDiscardPendingDraw(maxwell3d->GetNativeMacroEngine().native_turing,
-                                              maxwell3d->regs.zeta_enable != 0,
-                                              draw_state.draw_element_count,
-                                              draw_state.draw_element_count);
+                                               maxwell3d->regs.zeta_enable != 0,
+                                               draw_state.draw_element_count,
+                                               draw_state.draw_element_count, discard_native);
     return discard ? nullptr : pipeline;
 }
 

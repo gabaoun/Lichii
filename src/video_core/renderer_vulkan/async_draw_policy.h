@@ -9,9 +9,9 @@
 namespace Vulkan {
 
 constexpr bool CanDiscardPendingDraw(bool native, bool depth_enabled, u32 index_count,
-                                    u32 vertex_count) {
+                                    u32 vertex_count, bool discard_native = false) {
     // Native draws can produce persistent resources, even with depth enabled.
-    if (native) {
+    if (native && !discard_native) {
         return false;
     }
     // Preserve the legacy async-shader heuristic.

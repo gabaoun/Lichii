@@ -327,6 +327,9 @@ struct Memory::Impl {
     }
 
     [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
+        if ((addr >> YUZU_PAGEBITS) == ((addr + size) >> YUZU_PAGEBITS)) {
+            return GetPointerSilent(addr);
+        }
         const auto first = current_page_table->entries[addr >> YUZU_PAGEBITS].Block();
         const auto last = current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block();
         if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
@@ -339,6 +342,9 @@ struct Memory::Impl {
         return GetContiguousSpan(addr, size);
     }
     [[nodiscard]] inline u8* GetSpan(const VAddr addr, const std::size_t size) noexcept {
+        if ((addr >> YUZU_PAGEBITS) == ((addr + size) >> YUZU_PAGEBITS)) {
+            return GetPointerSilent(addr);
+        }
         const auto first = current_page_table->entries[addr >> YUZU_PAGEBITS].Block();
         const auto last = current_page_table->entries[(addr + size) >> YUZU_PAGEBITS].Block();
         if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
@@ -661,13 +667,29 @@ struct Memory::Impl {
         std::scoped_lock lk{read_trap_mutex};
         const u64 page_end = ((vaddr + size - 1) >> YUZU_PAGEBITS) + 1;
         auto it = armed_read_traps.lower_bound(vaddr >> YUZU_PAGEBITS);
+        u64 run_begin = 0;
+        u64 run_pages = 0;
+        const auto unprotect_run = [&] {
+            if (run_pages > 0) {
+                host_buffer->Protect(run_begin << YUZU_PAGEBITS, run_pages << YUZU_PAGEBITS,
+                                     Common::MemoryPermission::Read);
+                run_pages = 0;
+            }
+        };
         while (it != armed_read_traps.end() && *it < page_end) {
             // Still cached (this read came through the rasterizer path): writes stay trapped.
-            host_buffer->Protect(*it << YUZU_PAGEBITS, YUZU_PAGESIZE,
-                                 Common::MemoryPermission::Read);
+            const u64 page = *it;
+            if (run_pages > 0 && page != run_begin + run_pages) {
+                unprotect_run();
+            }
+            if (run_pages == 0) {
+                run_begin = page;
+            }
+            ++run_pages;
             it = armed_read_traps.erase(it);
             armed_read_trap_count.fetch_sub(1, std::memory_order_relaxed);
         }
+        unprotect_run();
     }
 
     /**
@@ -912,12 +934,18 @@ struct Memory::Impl {
         }
         gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             const DAddr end_address = address + size;
+            DisarmReadTraps(v_address, size);
             if (current_area.start_address <= address && end_address <= current_area.end_address)
                 [[likely]] {
                 return;
             }
-            DisarmReadTraps(v_address, size);
             current_area = system.GPU().OnCPURead(address, size);
+            if (current_area.end_address > address) {
+                const size_t area_tail = static_cast<size_t>(current_area.end_address - address);
+                if (area_tail > size && GetContiguousSpan(v_address, area_tail) == p) {
+                    DisarmReadTraps(v_address, area_tail);
+                }
+            }
         });
     }
 
