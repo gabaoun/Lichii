@@ -14,10 +14,12 @@
 
 extern "C" {
 
+#if !defined(_MSVC_STL_UPDATE) || _MSVC_STL_UPDATE < 202404L
 struct _Min_max_2u {
     uint16_t _Min;
     uint16_t _Max;
 };
+#endif
 
 enum class _Thrd_result : int { _Success, _Nomem, _Timedout, _Busy, _Error };
 
@@ -112,7 +114,7 @@ _Min_max_element_t __stdcall __std_minmax_element_2u(const void* _First, const v
     return _Min_max_element_t{ res.first, res.second };
 }
 
-_Min_max_2u __stdcall __std_minmax_2u(const void* _First, const void* _Last) noexcept {
+__declspec(noalias) _Min_max_2u __stdcall __std_minmax_2u(const void* _First, const void* _Last) noexcept {
     auto f = static_cast<const uint16_t*>(_First);
     auto l = static_cast<const uint16_t*>(_Last);
     auto res = std::minmax_element(f, l);
