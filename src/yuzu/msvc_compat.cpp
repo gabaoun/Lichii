@@ -12,14 +12,17 @@
 #include <windows.h>
 #include <synchapi.h>
 
+// MSVC STL 17.10+ (_MSVC_STL_UPDATE >= 202404L) already provides every
+// vector-algorithms, minmax, find, search, mismatch, remove and condition-
+// variable shim this file used to supply. Only emit them for older toolsets.
+#if !defined(_MSVC_STL_UPDATE) || _MSVC_STL_UPDATE < 202404L
+
 extern "C" {
 
-#if !defined(_MSVC_STL_UPDATE) || _MSVC_STL_UPDATE < 202404L
 struct _Min_max_2u {
     uint16_t _Min;
     uint16_t _Max;
 };
-#endif
 
 enum class _Thrd_result : int { _Success, _Nomem, _Timedout, _Busy, _Error };
 
@@ -164,4 +167,6 @@ _Thrd_result __stdcall _Cnd_timedwait_for_unchecked(_Cnd_t cnd, _Mtx_t mtx, unsi
 }
 
 } // extern "C"
-#endif
+
+#endif // _MSVC_STL_UPDATE < 202404L
+#endif // _MSC_VER
