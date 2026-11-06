@@ -25,7 +25,6 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
-#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -156,9 +155,6 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
-            // The fence's commands can be held back by a deferred flush that only this thread
-            // submits. The fencing thread waits for that submission before releasing the fence,
-            // so waiting here without submitting deadlocks (Ocarina of Time entering gameplay).
             SubmitDeferredWork();
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
@@ -195,7 +191,6 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
-    /// Submits work whose submission the backend deferred (called before blocking on a fence).
     virtual void SubmitDeferredWork() {}
 
     VideoCore::RasterizerInterface& rasterizer;
@@ -359,19 +354,7 @@ private:
         }
         {
             std::scoped_lock lock{buffer_cache.mutex};
-            // EDEN_NX2_PREFLUSH_EVERY=N (default 1): commit buffer downloads at one fence in N
-            // that has some. The GPU writes collected meanwhile merge, so a range rewritten
-            // between fences is copied back once instead of at each (Ocarina of Time: ~700 MB/s
-            // at ~4,400 fences/s). The debug server's preflush_batching flips N at runtime.
-            const u32 period = VideoCore::Nx2Debug::PreflushBatchPeriod();
-            if (period > 1 && last_download_period <= 1) {
-                // Batching just turned on: the pages queued while downloads still landed at
-                // every fence were not trapped yet.
-                buffer_cache.ArmDeferredDownloadTraps();
-            }
-            last_download_period = period;
-            if (buffer_cache.HasUncommittedFlushes() && ++buffer_commit_tick >= period) {
-                buffer_commit_tick = 0;
+            if (buffer_cache.HasUncommittedFlushes()) {
                 buffer_cache.CommitAsyncFlushes();
                 flushes.should_flush = true;
                 flushes.committed |= BufferFlushes;
@@ -408,8 +391,6 @@ private:
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
-    u32 buffer_commit_tick{}; ///< Fences with buffer downloads not yet committed (GPU thread only)
-    u32 last_download_period{1}; ///< PreflushBatchPeriod at the last fence (GPU thread only)
 
     std::mutex guard;
     std::mutex ring_guard;

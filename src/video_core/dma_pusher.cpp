@@ -35,7 +35,7 @@ constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
 bool DmaPusher::IsMemoryWriter(const Engines::EngineInterface& engine, Engines::EngineTypes type,
-                               u32 method) {
+                              u32 method) {
     if (type == Engines::EngineTypes::KeplerCompute) {
         return static_cast<const Engines::KeplerCompute&>(engine).MayWriteMemory(method);
     }
@@ -719,11 +719,7 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     const GPUVAddr end_page = (address + size + 0xfff) & ~GPUVAddr{0xfff};
     const bool dirty = memory_manager.IsMemoryDirty(first_page, end_page - first_page,
                                                     VideoCommon::CacheType::BufferCache);
-    static const bool list_cpu_sync = [] {
-        const char* value = std::getenv("EDEN_NX2_LIST_CPU_SYNC");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (rasterizer != nullptr && list_cpu_sync) {
+    if (rasterizer != nullptr) {
         std::vector<DAddr> pages;
         for (GPUVAddr page = first_page; page < end_page; page += 0x1000) {
             if (const auto device = memory_manager.GpuToCpuAddress(page)) {

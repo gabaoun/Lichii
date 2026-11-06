@@ -19,7 +19,7 @@ namespace Vulkan {
 constexpr bool CanDiscardPendingDraw(bool native, bool depth_enabled, u32 index_count,
                                     u32 vertex_count, bool discard_native = false) {
     // Native draws can produce persistent resources, even with depth enabled. They are only
-    // skipped when enabled (EDEN_NX2_ASYNC_DISCARD), trading a possible missing
+    // skipped when the user opts in (EDEN_NX2_ASYNC_DISCARD=1), trading a possible missing
     // effect for no stall while a new pipeline builds.
     if (native && !discard_native) {
         return false;

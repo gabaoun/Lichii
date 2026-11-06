@@ -21,7 +21,6 @@
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/buffer_cache/uniform_stream_reuse.h"
-#include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
@@ -211,15 +210,9 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     // structures next to the draw arguments its compute dispatches fill in; the draws then read
     // leftover bytes as vertex counts. Download those bytes first (the CPU's own were subtracted
     // above, so they aren't overwritten).
-    // Only the scheduler's owner may download or inline-upload (it records and submits): unmaps and
-    // other writes reach this from CPU and service threads too, and submitting there raced the GPU
-    // thread's own submissions (crashes in Scheduler::SubmitExecution). Those keep the old
-    // behaviour; guest CPU writes come through TryCacheInvalidation, which sends such pages to the
-    // GPU thread.
     const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
     const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
-    if (keep_page_gpu_data && VideoCommon::GpuSplit::OwnsScheduler() &&
-        gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
+    if (keep_page_gpu_data && gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
         // Switch 2 titles: upload the CPU's bytes into the buffer instead, as CachedWriteMemory
         // does, so the page stays GPU-owned and nothing waits for the host GPU.
         static const int forced = [] {
@@ -282,57 +275,23 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     DAddr device_addr_end_aligned = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
     area->start_address = device_addr_start_aligned;
     area->end_address = device_addr_end_aligned;
-    const DAddr aligned_size = device_addr_end_aligned - device_addr_start_aligned;
-    // With batched or disabled fence downloads (DeferredDownloadTraps) a Preflushable mark no
-    // longer means guest memory holds the newest bytes: a still-dirty range forces its download
-    // below, and this read's consumed trap is forgotten either way so the next GPU write really
-    // re-arms the core instead of being skipped by the deduplication cache.
-    const bool deferred = DeferredDownloadTraps();
-    if (memory_tracker.IsRegionPreflushable(device_addr, size) &&
-        !(deferred && IsRegionGpuModified(device_addr_start_aligned, aligned_size))) {
+    if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
         area->preemtive = true;
-        if (deferred) {
-            read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
-        }
         return area;
     };
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
                                            device_addr_end_aligned - device_addr_start_aligned);
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
-    static const int preflush_env = [] {
-        const char* val = std::getenv("EDEN_NX2_PREFLUSH");
-        return val ? std::atoi(val) : -1;
-    }();
-    const bool preflush = preflush_env >= 0 ? (preflush_env != 0)
-                                            : true;
+    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
     if (!area->preemtive) {
-        if (preflush) {
-            constexpr u64 max_expand = 16_MiB;
-            ForEachBufferInRange(
-                device_addr_start_aligned, aligned_size, [&](BufferId, Buffer& buffer) {
-                    const DAddr buf_begin =
-                        Common::AlignDown(buffer.CpuAddr(), Core::DEVICE_PAGESIZE);
-                    const DAddr buf_end = Common::AlignUp(buffer.CpuAddr() + buffer.SizeBytes(),
-                                                          Core::DEVICE_PAGESIZE);
-                    if (buf_end - buf_begin <= max_expand) {
-                        device_addr_start_aligned =
-                            (std::min)(device_addr_start_aligned, buf_begin);
-                        device_addr_end_aligned = (std::max)(device_addr_end_aligned, buf_end);
-                    }
-                });
-            area->start_address = device_addr_start_aligned;
-            area->end_address = device_addr_end_aligned;
-        }
-        const DAddr flush_size = device_addr_end_aligned - device_addr_start_aligned;
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
-            Nx2DownloadTrace::Marked(device_addr_start_aligned, flush_size, preflush);
+            Nx2DownloadTrace::Marked(device_addr_start_aligned,
+                                     device_addr_end_aligned - device_addr_start_aligned, preflush);
         }
         if (preflush) {
-            memory_tracker.MarkRegionAsPreflushable(device_addr_start_aligned, flush_size);
-            if (deferred) {
-                read_trapped_ranges.Subtract(device_addr_start_aligned, flush_size);
-            }
+            memory_tracker.MarkRegionAsPreflushable(
+                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         } else {
             if constexpr (USE_MEMORY_MAPS) {
                 cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
@@ -340,7 +299,8 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
             }
             // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
             // really rearms the core instead of being skipped by the deduplication cache.
-            read_trapped_ranges.Subtract(device_addr_start_aligned, flush_size);
+            read_trapped_ranges.Subtract(
+                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         }
     } else {
         // The core keeps this area and has no mark. The next GPU write here must arm the range
@@ -873,9 +833,8 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
         }
         ssbo_addr = holder + indirect_offset;
     }
-    channel_state->compute_storage_buffers[ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written, kepler_compute->IsDlssDispatch(),
-                             indirect_offset != ~0U, true);
+    channel_state->compute_storage_buffers[ssbo_index] = StorageBufferBinding(
+        ssbo_addr, cbuf_index, is_written, kepler_compute->IsNativeMode(), indirect_offset != ~0U);
     if (indirect_offset != ~0U) {
         TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->compute_storage_buffers[ssbo_index]);
@@ -1397,7 +1356,6 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Native programs keep tables next to their code in a 64 KiB bank read with indirect offsets
     // (Splatoon Raiders: the dialogue box corners in c1). Writes to that memory can go unnoticed by
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
-    // Copied directly: marking it CPU-modified unprotected and reprotected its pages each frame.
     if (has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
         size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
         (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
@@ -2934,39 +2892,37 @@ void BufferCache<P>::TraceTablePointer(bool compute, size_t stage, size_t ssbo_i
 
 template <class P>
 Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
-                                             bool native_pointer, bool table_pointer,
-                                             bool compute) const {
+                                             bool native_pointer, bool table_pointer) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
 
     if (gpu_addr == 0) {
         return NULL_BINDING;
     }
 
-    // The size word after a plain pointer is part of the answer; pool and native pointers ignore
-    // it.
     const bool reads_size_word = !(table_pointer && !is_written) && !native_pointer;
     const u64 next_qword = reads_size_word ? gpu_memory->Read<u64>(ssbo_addr + 8) : 0;
-    // Every draw rebinds each storage buffer: the layout lookup (a mutex), the range walk and
-    // two page walks cost Ocarina's GPU thread ~6%. Answers hold until the page table changes.
+    const u32 alignment = runtime.GetStorageBufferAlignment();
     struct CachedBinding {
-        size_t owner; ///< MemoryManager id + 1, 0 when empty
+        size_t owner;
         GPUVAddr gpu_addr;
         u64 next_qword;
         u64 serial;
+        u32 alignment;
         u32 flags;
         Binding binding;
     };
-    constexpr size_t Ways = 4;
-    thread_local std::array<std::array<CachedBinding, Ways>, 512> binding_cache{};
-    const u32 flags = (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) |
-                      (table_pointer ? 4U : 0U) | (compute ? 8U : 0U);
+    constexpr size_t ways = 4;
+    thread_local std::array<std::array<CachedBinding, ways>, 512> binding_cache{};
+    const u32 flags =
+        (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) | (table_pointer ? 4U : 0U);
     const size_t owner = gpu_memory->GetID() + 1;
     const u64 serial = gpu_memory->MapSerial();
     auto& set = binding_cache[((gpu_addr ^ next_qword ^ flags) * 0x9E3779B97F4A7C15ULL) >> 55];
-    for (size_t way = 0; way < Ways; ++way) {
+    for (size_t way = 0; way < ways; ++way) {
         const CachedBinding& cached = set[way];
         if (cached.owner == owner && cached.gpu_addr == gpu_addr &&
-            cached.next_qword == next_qword && cached.flags == flags && cached.serial == serial) {
+            cached.next_qword == next_qword && cached.serial == serial &&
+            cached.alignment == alignment && cached.flags == flags && !Nx2Perf::Verify()) {
             const Binding hit = cached.binding;
             std::rotate(set.begin(), set.begin() + way, set.begin() + way + 1);
             return hit;
@@ -2978,19 +2934,14 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
             // A pointer read from a table in memory is the base of an object pool, read anywhere in
             // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-            // its mapping, up to 64 MiB (256 MiB for compute: its fog light probes, SH records
-            // ~104-122 MiB past their pointer, all read 0 at 64 MiB and the volumetric fog lost its
-            // sky ambient). The 8 MiB cap made the grass reads return 0 and culled every blade.
-            // Written pools keep the cap: a write marks the whole binding GPU-modified.
+            // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
+            // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
             if (table_pointer && !is_written) {
-                return (std::min)(memory_layout_size,
-                                  static_cast<u32>(compute ? 256_MiB : 64_MiB));
+                return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
             }
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
             // as one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
-            // Only DLSS passes size from the mapping: doing it for every native dispatch binds up to
-            // 8 MiB per buffer and slows Hyrule Warriors' fights to a few fps, then hangs them.
             if (native_pointer) {
                 return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
             }
@@ -3009,7 +2960,6 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         }
 
         // Alignment only applies to the offset of the buffer
-        const u32 alignment = runtime.GetStorageBufferAlignment();
         const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
         const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
 
@@ -3029,13 +2979,6 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         if (is_written) {
             binding_size = aligned_size;
         }
-        if constexpr (requires { runtime.GetMaxStorageBufferRange(); }) {
-            // A read-only pool's 256 MiB compute cap is above the 128 MiB every device
-            // guarantees. Only those are clamped, so no write is cut off.
-            if (table_pointer && !is_written) {
-                binding_size = (std::min)(binding_size, runtime.GetMaxStorageBufferRange());
-            }
-        }
         return Binding{
             .device_addr = *aligned_device_addr,
             .gpu_addr = aligned_gpu_addr,
@@ -3044,7 +2987,7 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         };
     }();
     std::rotate(set.begin(), set.end() - 1, set.end());
-    set[0] = {owner, gpu_addr, next_qword, serial, flags, binding};
+    set[0] = {owner, gpu_addr, next_qword, serial, alignment, flags, binding};
     return binding;
 }
 
