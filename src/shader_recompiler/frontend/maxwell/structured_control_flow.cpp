@@ -906,6 +906,7 @@ private:
         std::vector<IR::Block*> demote_blocks;
         std::vector<IR::U1> demote_conds;
         u32 num_epilogues{};
+        u32 demotes_with_code{};
         u32 branch_depth{};
         for (const IR::AbstractSyntaxNode& node : syntax_list) {
             if (node.type == Type::If) {
@@ -917,9 +918,16 @@ private:
             if (node.type != Type::Block) {
                 continue;
             }
+            size_t insts_before{};
             for (const IR::Inst& inst : node.data.block->Instructions()) {
                 const IR::Opcode op{inst.GetOpcode()};
                 if (op == IR::Opcode::DemoteToHelperInvocation) {
+                    if (insts_before != 0) {
+                        // The block moves as a whole, but its CFG edges and the phis of its old
+                        // merge block still name it. The AMD proprietary driver turns that into
+                        // black output for the whole draw (Ocarina of Time on Windows).
+                        ++demotes_with_code;
+                    }
                     // Skip reordering nested demote branches.
                     if (branch_depth <= 1) {
                         demote_blocks.push_back(node.data.block);
@@ -929,12 +937,13 @@ private:
                 // Returns count at any depth: a nested early return (an EXIT under two
                 // conditions, as native fragment programs end their discarded invocations) would
                 // otherwise leave before the demote moved to the end, and write its colours.
+                ++insts_before;
                 if (op == IR::Opcode::Epilogue) {
                     ++num_epilogues;
                 }
             }
         }
-        if (demote_blocks.size() == 0) {
+        if (demote_blocks.size() == 0 || demotes_with_code != 0) {
             return;
         }
         if (num_epilogues > 1) {

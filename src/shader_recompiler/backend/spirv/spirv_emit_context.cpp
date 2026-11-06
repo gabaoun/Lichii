@@ -32,7 +32,11 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
+    // A Sampled Type of integer is invalid SPIR-V when Dref is set (OpTypeImage constraint:
+    // "If Dref is 1, Sampled Type must be a float or vector of float"), and all Dref image
+    // instructions emit a float result type. Depth-compare (shadow) textures must therefore
+    // use a float Sampled Type even when they are also marked as integer.
+    const Id type{desc.is_depth ? ctx.F32[1] : desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
     const bool depth{desc.is_depth};
     const bool ms{desc.is_multisample};
     switch (desc.type) {
@@ -179,7 +183,11 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
         if (xfb_varying) {
             ctx.Decorate(id, spv::Decoration::XfbBuffer, xfb_varying->buffer);
             ctx.Decorate(id, spv::Decoration::XfbStride, xfb_varying->stride);
-            ctx.Decorate(id, spv::Decoration::Offset, xfb_varying->offset);
+            // A varying that starts inside a vector (attribute % 4 != 0) is emitted as its own
+            // variable with a Component decoration, so its byte offset is the vector's offset plus
+            // the components it skips.
+            ctx.Decorate(id, spv::Decoration::Offset,
+                         xfb_varying->offset + static_cast<u32>(element) * 4U);
             if (ctx.stage == Stage::Geometry && xfb_varying->stream != 0) {
                 ctx.Decorate(id, spv::Decoration::Stream, xfb_varying->stream);
             }
