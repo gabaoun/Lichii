@@ -618,6 +618,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 15
+
       - name: Download binaries
         uses: actions/download-artifact@v7
         with:
@@ -662,40 +667,52 @@ jobs:
           fi
           tag="build-${GITHUB_RUN_NUMBER}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          commits=$(git log -n 10 --pretty=format:"- \`%h\` %s")
 
           cat > notes.md <<EOF
-          Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
+          Build automático da branch \`${GITHUB_REF_NAME}\` no commit \`${GITHUB_SHA::10}\` (com Auto-Updater integrado apontando para \`${GITHUB_REPOSITORY}\`).
 
-          ## Linux
+          ## 📦 Downloads (Windows x86_64)
 
-          Linux packages come as an AppImage (self-contained, needs glibc 2.39 or newer: Ubuntu 24.04, Fedora 40, Debian 13, Arch) and a tar.gz (uses your system libraries, so Qt 6 and the usual libraries must be installed).
+          Basta extrair o arquivo \`.zip\` e executar o \`lichii.exe\` (seus saves, jogos e configurações em \`%APPDATA%\eden\` são mantidos automaticamente).
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
+          | Versão | Download | Compilador & Otimizações | Recomendação |
           | --- | --- | --- | --- |
-          | amd64 | [AppImage](${base}/lichii-linux-x86_64.AppImage) · [tar.gz](${base}/lichii-linux-x86_64.tar.gz) | [AppImage](${base}/lichii-linux-x86_64-pgo.AppImage) · [tar.gz](${base}/lichii-linux-x86_64-pgo.tar.gz) | Make the AppImage executable (\`chmod +x\`) and run it |
-          | ARM (aarch64) | [AppImage](${base}/lichii-linux-aarch64.AppImage) · [tar.gz](${base}/lichii-linux-aarch64.tar.gz) | [AppImage](${base}/lichii-linux-aarch64-pgo.AppImage) · [tar.gz](${base}/lichii-linux-aarch64-pgo.tar.gz) | |
+          | **PGO + Zen 3 (Recomendada)** | [**lichii-windows-x86_64-pgo.zip**](${base}/lichii-windows-x86_64-pgo.zip) | **MinGW Clang + LLD** (\`-march=znver3 -O3\` + \`eglantine.profdata\` + AV1) | **Maior FPS e menor frametime** (otimizada com Profile-Guided Optimization e instruções nativas AMD Ryzen Zen 3 / AVX2) |
+          | **Standard (MSVC AVX2)** | [**lichii-windows-x86_64.zip**](${base}/lichii-windows-x86_64.zip) | **MSVC 2022** (\`/arch:AVX2 /Ob3 /Oi /Ot /Gw\`) | Alta compatibilidade e depuração nativa no Windows |
 
-          ## Windows
+          ---
 
-          Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
+          ## 🚀 Principais Melhorias e Correções Incluídas
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | amd64 / x86_64 (MSVC) | [MSVC zip](${base}/lichii-windows-x86_64.zip) | | Use if you run into graphical issues on other builds |
-          | amd64 / x86_64 (MinGW) | | [PGO zip](${base}/lichii-windows-x86_64-pgo.zip) | Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed |
+          ### 🗡️ The Legend of Zelda: Ocarina of Time (\`0400486024DEC000\`)
+          - **Lost Woods & Kokiri Forest (Fim dos Travamentos):**
+            - Eliminação dos ~704 stalls síncronos de 4 KiB por frame causados por *CPU read traps* (\`GetFlushArea\` agora faz flush coalescido do buffer até \`16 MiB\` de uma vez, somado ao \`DisarmReadTraps\` em lote e fast-path de página única em \`GetSpan\`).
+            - Limite de \`256 MiB\` nos ponteiros de tabelas read-only de *compute shaders* (evita varreduras de gigabytes na VRAM).
+          - **Fonte das Fadas / Great Fairy Fountain (Correção do 3D):**
+            - \`JoinImages\` no cache de texturas agora ignora \`RefreshContents\` quando uma cópia de alias sobrescreve 100% do *render target* 2D, evitando apagar a geometria 3D recém-renderizada.
+            - Divisão de acessos SSBO desalinhados de 64/128 bits no backend SPIR-V + barreira completa em \`WaitForIdle\`.
+            - Aumento do limite de registradores nos opcodes Ampere \`0xc24\` (\`IMAD\`), \`0x9a8\` (\`ATOMG\`) e \`0xb6c\`/\`0xf6c\` (\`TXD\`) para evitar rejeição de shaders de iluminação/partículas.
+          - **Mods Nativos Embutidos:**
+            - *Dynamic FPS* e *Max Resolution* integrados diretamente no carregador de módulos.
 
-          ## macOS
+          ### ⚡ Desempenho Geral, Shaders e CPU (Ryzen 7 5700X / Zen 3)
+          - **Vetorização AVX2 + Inlining Nível 3 (\`/Ob3\`):** Ativados em todos os módulos do emulador e no JIT ARM64 (\`dynarmic\`), removendo o padding desnecessário de errata Intel Skylake (\`/QIntel-jcc-erratum\`).
+          - **Zero Shader Stutter:**
+            - \`CanDiscardPendingDraw\` ativo por padrão quando *Asynchronous Shaders* está ligado (pula draws não-críticos enquanto compila em background).
+            - Shaders nativos com guardas agora são salvos no cache de disco (\`vulkan.bin\`) e os pipelines compilados são mantidos na VRAM durante toda a sessão (sem re-compilar após *Fast Travel*).
+          - **Auto-Updater Integrado:** O emulador verifica novas Releases deste repositório automaticamente ao iniciar e permite escolher entre baixar a atualização **PGO** ou **Standard**.
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | arm64 (Apple Silicon) | [zip](${base}/lichii-macos-arm64.zip) | | macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\` |
+          ---
 
-          The PGO builds are the same programs compiled with profile-guided optimization (clang plus Eglantine's profile); prefer them when your CPU supports it.
+          ## 📝 Últimos Commits
+          ${commits}
           EOF
+          sed -i 's/^          //' notes.md
 
           gh release create "${tag}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --prerelease \
-            --title "Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            --title "Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7}) — AVX2/Zen3 & PGO" \
             --notes-file notes.md

@@ -19,7 +19,20 @@
 namespace Common::Net {
 
 std::vector<Asset> Release::GetPlatformAssets() const {
-    return GetPlatformAssets(Common::g_build_release_platform);
+    const std::string_view platform{Common::g_build_release_platform};
+    if (platform == "windows-x86_64" || platform == "windows-x86_64-pgo") {
+        std::vector<Asset> result;
+        for (const auto& a : GetPlatformAssets("windows-x86_64-pgo")) {
+            result.push_back(a);
+        }
+        for (const auto& a : GetPlatformAssets("windows-x86_64")) {
+            result.push_back(a);
+        }
+        if (!result.empty()) {
+            return result;
+        }
+    }
+    return GetPlatformAssets(platform);
 }
 
 std::vector<Asset> Release::GetPlatformAssets(std::string_view platform) const {
