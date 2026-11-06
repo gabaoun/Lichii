@@ -915,7 +915,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
 
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            pools.ReleaseContents();
             auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
             if (entry.pipeline) {
@@ -971,12 +972,14 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
 
         const u64 hash = key.Hash();
-        disk_pipelines.insert(hash);
+        if (!disk_pipelines.insert(hash).second) {
+            return;
+        }
         if (!PreloadAllPipelines() &&
-            (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+            (queued_graphics >= MaxPipelinesWithoutUsedList ||
+             (!used_pipelines.empty() && !used_pipelines.contains(hash)))) {
             ++skipped_pipelines;
-            if (BackgroundPipelinesEnabled()) {
+            if (BackgroundPipelinesEnabled() && deferred_graphics.size() < 64) {
                 deferred_graphics.emplace_back(key, std::move(envs));
             }
             return;
@@ -984,7 +987,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         ++queued_graphics;
 
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            pools.ReleaseContents();
             boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
@@ -1039,7 +1043,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 }
                 std::unique_ptr<GraphicsPipeline> pipeline;
                 if (build) {
-                    ShaderPools pools;
+                    thread_local ShaderPools pools;
+                    pools.ReleaseContents();
                     boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
                     for (auto& env : envs_) {
                         env_ptrs.push_back(&env);
