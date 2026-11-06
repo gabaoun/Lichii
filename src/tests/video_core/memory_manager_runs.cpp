@@ -125,7 +125,7 @@ TEST_CASE("MaxContinuousRange from the mapping runs matches the page walk", "[me
         case 0:
         case 1:
         case 2:
-            // Continues the last device range: merges with a neighbour mapped just before.
+            // Continues the last device range: merges with a neighbour mapped before.
             memory.Map(address, next_device, size, pte_kind, big);
             next_device += size;
             break;

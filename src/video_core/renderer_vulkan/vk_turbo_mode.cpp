@@ -88,7 +88,6 @@ void TurboMode::Run(std::stop_token stop_token) {
         .pBindings = &layout_binding,
     });
 
-    // Actually create the descriptor set.
     auto descriptor_set = descriptor_pool.Allocate(VkDescriptorSetAllocateInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .pNext = nullptr,
@@ -111,7 +110,6 @@ void TurboMode::Run(std::stop_token stop_token) {
         .pPushConstantRanges = nullptr,
     });
 
-    // Actually create the pipeline.
     const VkPipelineShaderStageCreateInfo shader_stage{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pNext = nullptr,

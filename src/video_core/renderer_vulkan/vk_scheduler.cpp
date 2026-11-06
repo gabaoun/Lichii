@@ -958,7 +958,7 @@ void Scheduler::AcquireNewChunk() {
         // If we don't have anything reserved, we need to make a new chunk.
         chunk = std::make_unique<CommandChunk>();
     } else {
-        // Otherwise, we can just take from the reserve.
+        // Otherwise, take from the reserve.
         chunk = std::move(chunk_reserve.back());
         chunk_reserve.pop_back();
     }
