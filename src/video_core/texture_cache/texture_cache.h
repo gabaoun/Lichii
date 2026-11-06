@@ -295,8 +295,8 @@ void TextureCache<P>::TickFrame() {
         if (!native_thresholds_applied && gpu_memory != nullptr && gpu_memory->UsesNativeTiling()) {
             native_thresholds_applied = true;
             const u64 device_local = runtime.GetDeviceLocalMemory();
-            critical_memory = (std::max)(critical_memory, device_local - 256_MiB);
-            expected_memory = (std::max)(expected_memory, device_local - 1280_MiB);
+            critical_memory = (std::max)(critical_memory, (device_local / 4) * 3);
+            expected_memory = (std::max)(expected_memory, (device_local / 5) * 3);
             ApplyThresholdOverrides();
             native_critical_memory = critical_memory;
             native_expected_memory = expected_memory;
@@ -349,6 +349,9 @@ void TextureCache<P>::TickFrame() {
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    // Cap at 75% and 60% of budget to prevent driver paging and unbacked image fallbacks.
+                    critical_memory = (std::min)(critical_memory, (budget / 4) * 3);
+                    expected_memory = (std::min)(expected_memory, (budget / 5) * 3);
                     // Log the first values and real changes (the budget moves by a few MiB all
                     // the time).
                     const u64 change = critical_memory > old_critical
@@ -2105,6 +2108,12 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
 
 template <class P>
 ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
+    if (raw_config.Address() == 0 || raw_config.format.Value() == Tegra::Texture::TextureFormat{}) [[unlikely]] {
+        return NULL_IMAGE_VIEW_ID;
+    }
+    if (raw_config.Address() == 0 || raw_config.format.Value() == Tegra::Texture::TextureFormat{}) [[unlikely]] {
+        return NULL_IMAGE_VIEW_ID;
+    }
     const bool native = gpu_memory->UsesNativeTiling();
     if (native && raw_config.format.Value() == Tegra::Texture::TextureFormat{} &&
         RenderTrace::Enabled()) {

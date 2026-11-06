@@ -44,6 +44,73 @@ constexpr u32 Hash(TextureFormat format, ComponentType component, bool is_srgb =
 PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
                                        ComponentType blue, ComponentType alpha,
                                        bool is_srgb) noexcept {
+    if (format == TextureFormat{}) {
+        return PixelFormat::A8B8G8R8_UNORM;
+    }
+    if (format == TextureFormat{}) {
+        return PixelFormat::A8B8G8R8_UNORM;
+    }
+    const auto normalize = [](ComponentType type) noexcept {
+        if (type == ComponentType::UNORM_FORCE_FP16) return ComponentType::UNORM;
+        if (type == ComponentType::SNORM_FORCE_FP16) return ComponentType::SNORM;
+        return type;
+    };
+    red = normalize(red);
+    green = normalize(green);
+    blue = normalize(blue);
+    alpha = normalize(alpha);
+
+    switch (format) {
+    case TextureFormat::R16:
+        switch (red) {
+        case FLOAT: return PixelFormat::R16_FLOAT;
+        case UNORM: return PixelFormat::R16_UNORM;
+        case SNORM: return PixelFormat::R16_SNORM;
+        case UINT:  return PixelFormat::R16_UINT;
+        case SINT:  return PixelFormat::R16_SINT;
+        default: break;
+        }
+        break;
+    case TextureFormat::R8:
+        switch (red) {
+        case UNORM: return PixelFormat::R8_UNORM;
+        case SNORM: return PixelFormat::R8_SNORM;
+        case UINT:  return PixelFormat::R8_UINT;
+        case SINT:  return PixelFormat::R8_SINT;
+        default: break;
+        }
+        break;
+    case TextureFormat::R32:
+        switch (red) {
+        case FLOAT: return PixelFormat::R32_FLOAT;
+        case UINT:  return PixelFormat::R32_UINT;
+        case SINT:  return PixelFormat::R32_SINT;
+        default: break;
+        }
+        break;
+    case TextureFormat::R16G16:
+        switch (red) {
+        case FLOAT: return PixelFormat::R16G16_FLOAT;
+        case UNORM: return PixelFormat::R16G16_UNORM;
+        case SNORM: return PixelFormat::R16G16_SNORM;
+        case UINT:  return PixelFormat::R16G16_UINT;
+        case SINT:  return PixelFormat::R16G16_SINT;
+        default: break;
+        }
+        break;
+    case TextureFormat::G8R8:
+        switch (red) {
+        case UNORM: return PixelFormat::R8G8_UNORM;
+        case SNORM: return PixelFormat::R8G8_SNORM;
+        case UINT:  return PixelFormat::R8G8_UINT;
+        case SINT:  return PixelFormat::R8G8_SINT;
+        default: break;
+        }
+        break;
+    default:
+        break;
+    }
+
     switch (Hash(format, red, green, blue, alpha, is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;

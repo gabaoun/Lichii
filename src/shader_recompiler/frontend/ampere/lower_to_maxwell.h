@@ -303,17 +303,18 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         }
         RegisterPressure pressure{insn};
         bool requires_shadow = false;
+        const u32 shadow_base = (uses_uniform_bank ? high_uniform_base : 246U) & ~3U;
         for (u32 bit : {16U, 24U, 32U, 64U}) {
             if (opcode == 0x81c) break;
             if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927) continue;
             const u32 reg = insn.Bits(bit, 8);
-            if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
+            if (reg >= shadow_base && reg < 255)
                 requires_shadow = true;
         }
         if (requires_shadow) {
-            if (!uses_uniform_bank || (high_uniform_base & 3))
+            if (shadow_base < 4)
                 return fail(index, "native program uses lowering scratch registers");
-            pressure = PrepareRegisterPressure(insn, high_uniform_base);
+            pressure = PrepareRegisterPressure(insn, shadow_base);
             if (!pressure.valid) return fail(index, "native register shadowing mode");
             insn = pressure.instruction;
             result.instructions.insert(result.instructions.end(), pressure.prefix.begin(), pressure.prefix.end());
