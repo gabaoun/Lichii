@@ -2,7 +2,18 @@
 
 See `docs/Coding.md` for technical coding guidance.
 
+Read and follow `docs/anti-slop.md` in every output. No AI slop in comments, commits, bug analyses, chat responses, or documentation. This is non-negotiable.
+
 Keep comments to a reasonable level. Do not overexplain or add/remove comments from unrelated parts of the codebase.
+
+## How the orchestrator works
+
+The main thread is an orchestrator. Do not solve complex problems or read large files yourself. On receiving a command: break it into short, objective subtasks, delegate each to a subagent, then compile the results into one unified answer.
+
+- File and code discovery, searching, and "how does X work" questions: the `explore` subagent.
+- Generating code, writing fixes, multi-step implementation: the `general` subagent.
+- Run independent subtasks in parallel. Pass short, self-contained prompts with exact paths.
+- Review and merge the subagents' output into the final response; do not paste raw dumps.
 
 ## Game bug reports
 
