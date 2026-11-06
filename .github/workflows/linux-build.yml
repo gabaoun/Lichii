@@ -7,16 +7,6 @@ on:
         description: "Release tag to upload to (default: v1.2-custom)"
         type: string
         default: "v1.2-custom"
-  push:
-    branches:
-      - nx2-custom
-    paths:
-      - "src/**"
-      - "!src/tests/**"
-      - "CMakeLists.txt"
-      - "CMakeModules/**"
-      - "dist/**"
-      - ".github/workflows/linux-build.yml"
 
 permissions:
   contents: write
