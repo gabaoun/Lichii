@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -629,8 +630,24 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
-    // Native storage buffers ask this for up to 8 MiB on each bind, ~90,000 times a second in
-    // Ocarina's Kokiri village: answer from the runs kept at map time instead of walking pages.
+    // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 to ~220,000 times a
+    // second in Ocarina's Kokiri village: keep answers per thread in a 4096-entry direct cache
+    // until the page table changes (PR #670, +20% fps).
+    struct Entry {
+        size_t owner;
+        GPUVAddr gpu_addr;
+        size_t size;
+        u64 serial;
+        size_t result;
+    };
+    thread_local std::vector<Entry> cache(4096);
+    const u64 serial = map_serial.load(std::memory_order_acquire);
+    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 52];
+    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
+        entry.serial == serial) {
+        return entry.result;
+    }
+
     size_t result = 0;
     if (IsWithinGPUAddressRange(gpu_addr) && size <= address_space_size - gpu_addr) {
         const auto& runs = CurrentSnapshot().runs;
@@ -649,8 +666,9 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
                       "Nx2Perf mapping runs: MaxContinuousRange({:#x}, {:#x}) = {:#x}, walk {:#x}",
                       gpu_addr, size, result, expected);
         }
-        return expected;
+        result = expected;
     }
+    entry = {unique_identifier + 1, gpu_addr, size, serial, result};
     return result;
 }
 
