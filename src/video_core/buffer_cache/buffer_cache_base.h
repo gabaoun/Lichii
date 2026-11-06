@@ -44,6 +44,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -182,6 +183,7 @@ public:
 
 template <class P>
 class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInfo> {
+    friend struct BufferCacheTestAccess;
     // Page size for caching purposes.
     // This is unrelated to the CPU page size and it can be changed as it seems optimal.
 #ifdef YUZU_LEGACY
@@ -338,6 +340,15 @@ public:
     void CommitAsyncFlushes();
     void CommitAsyncFlushesHigh();
 
+    /// Batched downloads land only at a later fence: trap the pages of everything queued so far,
+    /// so a CPU read of one forces its download before the read completes. Covers the writes
+    /// queued before batching was enabled (they were not trapped then).
+    void ArmDeferredDownloadTraps() {
+        uncommitted_gpu_modified_ranges.ForEach([&](DAddr lower, DAddr upper) {
+            ArmReadTraps(lower, upper - lower);
+        });
+    }
+
     /// Pop asynchronous downloads
     void PopAsyncFlushes();
     void PopAsyncBuffers();
@@ -366,6 +377,8 @@ public:
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
+
+    void Nx2FlushListPages(std::span<const DAddr> pages);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
     /// no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
@@ -669,6 +682,25 @@ private:
         return AsyncBufferDownloads() || memory_tracker.IsRegionPreflushable(device_addr, size);
     }
 
+    /// EDEN_NX2_PREFLUSH_DOWNLOADS=0 (default on): Preflushable pages are not downloaded at
+    /// fences; their reads are trapped and flushed one by one instead (A/B measurements).
+    static bool PreflushDownloads() {
+        static const bool downloads = [] {
+            const char* value = std::getenv("EDEN_NX2_PREFLUSH_DOWNLOADS");
+            return value == nullptr || value[0] != '0';
+        }();
+        return downloads;
+    }
+
+    /// Whether fence downloads can lag the GPU's writes: batched (EDEN_NX2_PREFLUSH_EVERY>1 at
+    /// boot, or the debug server's preflush_batching) or off (EDEN_NX2_PREFLUSH_DOWNLOADS=0).
+    /// Deferred pages must then be read-trapped (QueueFenceDownload, ArmDeferredDownloadTraps)
+    /// and a CPU read of one must force its download (GetFlushArea), or the guest reads stale
+    /// bytes right after a fence's release (Ocarina of Time's auto-exposure).
+    static bool DeferredDownloadTraps() {
+        return !PreflushDownloads() || VideoCore::Nx2Debug::PreflushBatchPeriod() > 1;
+    }
+
     /// Queues a GPU write for download at the next fence where DownloadsAtFence holds. With only
     /// Preflushable marks, just the marked pages are queued: a write that covers one marked page
     /// of a large buffer would otherwise copy the whole buffer back at every fence.
@@ -679,11 +711,23 @@ private:
         }();
         if (AsyncBufferDownloads()) {
             uncommitted_gpu_modified_ranges.Add(device_addr, size);
+            if (DeferredDownloadTraps()) {
+                // The download lands only at a later fence: trap the pages so a CPU read of
+                // them forces the download before it completes.
+                ArmReadTraps(device_addr, size);
+            }
+            return;
+        }
+        if (!PreflushDownloads()) {
+            ArmReadTraps(device_addr, size);
             return;
         }
         if (!exact) {
             if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
                 uncommitted_gpu_modified_ranges.Add(device_addr, size);
+                if (DeferredDownloadTraps()) {
+                    ArmReadTraps(device_addr, size);
+                }
             } else {
                 ArmReadTraps(device_addr, size);
             }
@@ -699,7 +743,7 @@ private:
                 queued += upper - lower;
             }
         });
-        if (queued < size) {
+        if (queued < size || DeferredDownloadTraps()) {
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {

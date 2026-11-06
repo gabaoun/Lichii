@@ -66,6 +66,13 @@ public:
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 
+    [[nodiscard]] bool MayWriteMemory(u32 method) const {
+        if (method >= native_plain_methods.size()) {
+            return true;
+        }
+        return native_mode ? !native_plain_methods[method] : execution_mask[method];
+    }
+
     /// The channel's MME data RAM, shared with its 3D engine.
     void SetNativeDataRam(std::array<u32, 0xc00>* data_ram) { native_data_ram = data_ram; }
     void SetNativeMacroMode(MacroEngine* shared_macro, std::span<u32> positions, NativeMacroContext* context = nullptr) {
@@ -245,6 +252,8 @@ public:
     }
 
     bool IsNativeMode() const { return native_mode; }
+    /// Whether the dispatch being run is a pass of a game DLSS evaluation (Fortune's Weave).
+    bool IsDlssDispatch() const { return native_mode && dlss_chain.active; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 

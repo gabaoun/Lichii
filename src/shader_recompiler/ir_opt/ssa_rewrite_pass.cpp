@@ -54,8 +54,29 @@ struct IndirectBranchVariable {
 };
 
 using Variant = std::variant<IR::Reg, IR::Pred, ZeroFlagTag, SignFlagTag, CarryFlagTag, OverflowFlagTag, GotoVariable, IndirectBranchVariable>;
-// TODO: majority of these require stable iterators, test with XC beforehand
-using ValueMap = std::unordered_map<IR::Block*, IR::Value>;
+// Definitions are copied out as soon as they are read, so the tables need no stable references.
+// Fixed-count variables live in the blocks, like registers: every read walks back through
+// blocks and looks up or writes a definition in each, and node-based maps per variable made
+// those lookups and their allocations a large part of the pass.
+constexpr size_t SSA_ZERO_FLAG = IR::NUM_USER_PREDS;
+constexpr size_t SSA_SIGN_FLAG = IR::NUM_USER_PREDS + 1;
+constexpr size_t SSA_CARRY_FLAG = IR::NUM_USER_PREDS + 2;
+constexpr size_t SSA_OVERFLOW_FLAG = IR::NUM_USER_PREDS + 3;
+constexpr size_t SSA_INDIRECT_BRANCH = IR::NUM_USER_PREDS + 4;
+static_assert(SSA_INDIRECT_BRANCH < IR::Block::NUM_SSA_VALUES);
+
+struct GotoKey {
+    bool operator==(const GotoKey&) const noexcept = default;
+
+    IR::Block* block;
+    u32 index;
+};
+
+struct GotoKeyHash {
+    size_t operator()(const GotoKey& key) const noexcept {
+        return std::hash<IR::Block*>{}(key.block) ^ (static_cast<size_t>(key.index) << 32);
+    }
+};
 
 struct DefTable {
     const IR::Value& Def(IR::Block* block, IR::Reg variable) {
@@ -66,62 +87,57 @@ struct DefTable {
     }
 
     const IR::Value& Def(IR::Block* block, IR::Pred variable) {
-        return preds[IR::PredIndex(variable)][block];
+        return block->SsaValue(IR::PredIndex(variable));
     }
     void SetDef(IR::Block* block, IR::Pred variable, const IR::Value& value) {
-        preds[IR::PredIndex(variable)].insert_or_assign(block, value);
+        block->SetSsaValue(IR::PredIndex(variable), value);
     }
 
     const IR::Value& Def(IR::Block* block, GotoVariable variable) {
-        return goto_vars[variable.index][block];
+        const auto it{goto_vars.find(GotoKey{block, variable.index})};
+        return it != goto_vars.end() ? it->second : empty;
     }
     void SetDef(IR::Block* block, GotoVariable variable, const IR::Value& value) {
-        goto_vars[variable.index].insert_or_assign(block, value);
+        goto_vars.insert_or_assign(GotoKey{block, variable.index}, value);
     }
 
     const IR::Value& Def(IR::Block* block, IndirectBranchVariable) {
-        return indirect_branch_var[block];
+        return block->SsaValue(SSA_INDIRECT_BRANCH);
     }
     void SetDef(IR::Block* block, IndirectBranchVariable, const IR::Value& value) {
-        indirect_branch_var.insert_or_assign(block, value);
+        block->SetSsaValue(SSA_INDIRECT_BRANCH, value);
     }
 
     const IR::Value& Def(IR::Block* block, ZeroFlagTag) {
-        return zero_flag[block];
+        return block->SsaValue(SSA_ZERO_FLAG);
     }
     void SetDef(IR::Block* block, ZeroFlagTag, const IR::Value& value) {
-        zero_flag.insert_or_assign(block, value);
+        block->SetSsaValue(SSA_ZERO_FLAG, value);
     }
 
     const IR::Value& Def(IR::Block* block, SignFlagTag) {
-        return sign_flag[block];
+        return block->SsaValue(SSA_SIGN_FLAG);
     }
     void SetDef(IR::Block* block, SignFlagTag, const IR::Value& value) {
-        sign_flag.insert_or_assign(block, value);
+        block->SetSsaValue(SSA_SIGN_FLAG, value);
     }
 
     const IR::Value& Def(IR::Block* block, CarryFlagTag) {
-        return carry_flag[block];
+        return block->SsaValue(SSA_CARRY_FLAG);
     }
     void SetDef(IR::Block* block, CarryFlagTag, const IR::Value& value) {
-        carry_flag.insert_or_assign(block, value);
+        block->SetSsaValue(SSA_CARRY_FLAG, value);
     }
 
     const IR::Value& Def(IR::Block* block, OverflowFlagTag) {
-        return overflow_flag[block];
+        return block->SsaValue(SSA_OVERFLOW_FLAG);
     }
     void SetDef(IR::Block* block, OverflowFlagTag, const IR::Value& value) {
-        overflow_flag.insert_or_assign(block, value);
+        block->SetSsaValue(SSA_OVERFLOW_FLAG, value);
     }
 
-    std::array<ValueMap, IR::NUM_USER_PREDS> preds;
-    // TODO: Requires stable iterators
-    std::unordered_map<u32, ValueMap> goto_vars;
-    ValueMap indirect_branch_var;
-    ValueMap zero_flag;
-    ValueMap sign_flag;
-    ValueMap carry_flag;
-    ValueMap overflow_flag;
+    Common::unordered_map<GotoKey, IR::Value, GotoKeyHash> goto_vars;
+    const IR::Value empty{};
 };
 
 IR::Opcode UndefOpcode(IR::Reg) noexcept {
@@ -147,7 +163,6 @@ enum class Status {
     PushPhiArgument,
 };
 
-template <typename Type>
 struct ReadState {
     ReadState(IR::Block* block_) : block{block_} {}
     ReadState() = default;
@@ -169,11 +184,12 @@ public:
 
     template <typename Type>
     IR::Value ReadVariable(Type variable, IR::Block* root_block) {
-        // TODO: Windows commits sodoku if you use small_vector
-        std::vector<ReadState<Type>> stack{
-            ReadState<Type>(nullptr),
-            ReadState<Type>(root_block),
-        };
+        // Reads walk back through every block until they find a definition, often dozens deep:
+        // reuse one stack instead of growing a new vector on every read.
+        auto& stack{read_stack};
+        stack.clear();
+        stack.emplace_back(nullptr);
+        stack.emplace_back(root_block);
         const auto prepare_phi_operand{[&] {
             if (stack.back().pred_it == stack.back().pred_end) {
                 IR::Inst* const phi{stack.back().phi};
@@ -303,6 +319,8 @@ private:
     // TODO: Windows dies with stack exhaustion?
     std::unordered_map<IR::Block*, std::map<Variant, IR::Inst*>> incomplete_phis;
     DefTable current_def;
+    // ReadVariable never nests, so its walk stack can be shared
+    std::vector<ReadState> read_stack;
 };
 
 void VisitInst(Pass& pass, IR::Block* block, IR::Inst& inst) {
@@ -409,6 +427,20 @@ void SsaRewritePass(IR::Program& program) {
                     inst.SetFlags(GetConcreteType(&inst));
                 }
                 inst.OrderPhiArgs();
+            }
+        }
+    }
+    // Trivial phis and replaced reads stay in their blocks as Identity instructions, often more
+    // of them than real instructions. Those without uses cannot gain any now that the definition
+    // tables are gone: drop them here, as dead code elimination would later (same order), instead
+    // of letting every pass until then walk them.
+    for (IR::Block* const block : program.post_order_blocks) {
+        auto it{block->end()};
+        while (it != block->begin()) {
+            --it;
+            if (it->GetOpcode() == IR::Opcode::Identity && !it->HasUses()) {
+                it->Invalidate();
+                it = block->Instructions().erase(it);
             }
         }
     }

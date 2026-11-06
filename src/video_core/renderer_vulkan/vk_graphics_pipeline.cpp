@@ -306,6 +306,7 @@ GraphicsPipeline::GraphicsPipeline(
         num_descriptor_entries += NumDescriptorEntries(*info);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
+    fragment_writes_color = stage_infos[NUM_STAGES - 1].stores_frag_color;
     const auto any_written = [](const auto& descriptors) {
         return std::ranges::any_of(descriptors, [](const auto& desc) { return desc.is_written; });
     };
@@ -423,6 +424,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
         if constexpr (Spec::has_storage_buffers) {
+            Profile::Scope storage_scope{Profile::Zone::StorageBinds};
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
@@ -436,6 +438,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
+                Profile::Scope program_scope{Profile::Zone::HandleProgram};
                 return TexturePair(VideoCommon::EvaluateTextureHandle(
                                        info, desc.handle_program, *gpu_memory,
                                        [&](u32 cbuf) -> GPUVAddr {
@@ -491,6 +494,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
 
+                Profile::Scope sampler_scope{Profile::Zone::SamplerLookup};
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
             }
@@ -1092,6 +1096,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         VkColorComponentFlags write_mask{};
         for (size_t i = 0; i < mask_table.size(); ++i) {
             write_mask |= mask[i] ? mask_table[i] : 0;
+        }
+        // A target the fragment shader never writes gets undefined values in Vulkan; AMD's
+        // drivers store garbage (dark outlines around Ocarina's castle from a depth-test pass).
+        if (index >= fragment_writes_color.size() || !fragment_writes_color[index]) {
+            write_mask = 0;
         }
         cb_attachments.push_back({
             .blendEnable = blend.enable != 0,

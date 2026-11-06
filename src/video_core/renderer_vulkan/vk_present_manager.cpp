@@ -443,6 +443,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     while (swapchain.AcquireNextImage(!use_present_thread)) {
         RecreateSwapchain(frame);
     }
+    if (!swapchain.IsImageAcquired()) {
+        DiscardFrame(frame);
+        return;
+    }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
     cmdbuf.Begin({

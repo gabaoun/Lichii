@@ -2839,28 +2839,28 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     }
 }
 
-void TextureCacheRuntime::TickFrame() {
-    while (!pending_byte_addressed_shadows.empty() &&
-           scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
-        pending_byte_addressed_shadows.pop_front();
+static u64 TranscodeDecodeBytes(u32 width, u32 height, u32 levels, u32 layers) {
+    u64 bytes{};
+    for (u32 level = 0; level < levels; ++level) {
+        bytes += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
     }
-    static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
+    return bytes * layers;
+}
+
+u64 TextureCacheRuntime::PendingTranscode::DecodeBytes() const {
+    return TranscodeDecodeBytes(width, height, levels, layers);
+}
+
+void TextureCacheRuntime::ReleaseFinishedTranscodes() {
     // Finished decode images wait for the next texture of their shape, up to this much memory.
     static constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
-    const auto decode_bytes = [](const PendingTranscode& t) {
-        u64 bytes{};
-        for (u32 level = 0; level < t.levels; ++level) {
-            bytes += u64{(std::max)(t.width >> level, 1U)} * (std::max)(t.height >> level, 1U) * 4;
-        }
-        return bytes * t.layers;
-    };
     u64 free_bytes{};
     for (const PendingTranscode& t : free_transcodes) {
-        free_bytes += decode_bytes(t);
+        free_bytes += t.DecodeBytes();
     }
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
         PendingTranscode& done = pending_transcodes.front();
-        const u64 bytes = decode_bytes(done);
+        const u64 bytes = done.DecodeBytes();
         if (free_bytes + bytes <= MaxFreeTranscodeBytes) {
             done.unused_frames = 0;
             free_bytes += bytes;
@@ -2868,6 +2868,15 @@ void TextureCacheRuntime::TickFrame() {
         }
         pending_transcodes.pop_front();
     }
+}
+
+void TextureCacheRuntime::TickFrame() {
+    while (!pending_byte_addressed_shadows.empty() &&
+           scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
+        pending_byte_addressed_shadows.pop_front();
+    }
+    static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
+    ReleaseFinishedTranscodes();
     std::erase_if(free_transcodes, [](PendingTranscode& t) {
         return ++t.unused_frames > MAX_UNUSED_SCRATCH_FRAMES;
     });
@@ -4580,6 +4589,10 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     key.drop_reduction = has_minmax_reduction && !image_view.SupportsMinmaxFilter();
     key.drop_custom_border = has_custom_border_colors && image_view.RequiresBorderColorFormat();
     key.srgb_border = has_srgb_border_color && IsPixelFormatSRGB(image_view.format);
+    // A compare-enabled TSC read by a plain (non-Dref) sample: Maxwell ignores the comparison,
+    // Vulkan leaves it undefined and AMD returns the 0/1 compare result (Ocarina forest fog
+    // composite read alpha 0 -> black screen). Use a variant without comparison.
+    key.drop_compare = has_depth_comparison && !is_depth;
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();
         key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
@@ -4643,6 +4656,9 @@ VkSampler Sampler::Emplace(VariantKey key) {
     }
 
     VkSamplerCreateInfo create_info = base_ci;
+    if (key.drop_compare) {
+        create_info.compareEnable = VK_FALSE;
+    }
     create_info.pNext = chain;
     if (key.force_nearest) {
         create_info.magFilter = VK_FILTER_NEAREST;
@@ -4925,6 +4941,13 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     const u32 height = info.size.height;
     const u32 levels = static_cast<u32>(info.resources.levels);
     const u32 layers = static_cast<u32>(info.resources.layers);
+    // A large array is decoded a group of layers at a time: title 1 has 90-layer textures
+    // whose whole decode image is 967 MiB.
+    static constexpr u64 MaxDecodeImageBytes = u64{64} << 20;
+    const u32 group_layers = static_cast<u32>(std::clamp<u64>(
+        MaxDecodeImageBytes / TranscodeDecodeBytes(width, height, levels, 1), 1, layers));
+    const bool grouped = group_layers < layers;
+    ReleaseFinishedTranscodes();
     // The BC encoder declares layout(rgba8). Identical byte layout is not enough:
     // its storage image view must have the matching R8G8B8A8_UNORM format.
     constexpr VkFormat DecodeFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -4932,7 +4955,8 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // dozens of textures a frame, mostly of a few shapes. Making one took 263 us; from VMA's
     // shared blocks 90 us, but freeing them there left ~1 GB of those blocks unused.
     const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
-        return t.width == width && t.height == height && t.levels == levels && t.layers == layers;
+        return t.width == width && t.height == height && t.levels == levels &&
+               t.layers == group_layers;
     });
     PendingTranscode pending;
     if (reusable != free_transcodes.end()) {
@@ -4949,7 +4973,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 .format = DecodeFormat,
                 .extent = {width, height, 1},
                 .mipLevels = levels,
-                .arrayLayers = layers,
+                .arrayLayers = group_layers,
                 .samples = VK_SAMPLE_COUNT_1_BIT,
                 .tiling = VK_IMAGE_TILING_OPTIMAL,
                 .usage = VK_IMAGE_USAGE_STORAGE_BIT,
@@ -4959,10 +4983,11 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             }, true),
             .views = {},
+            .layer_views = {},
             .width = width,
             .height = height,
             .levels = levels,
-            .layers = layers,
+            .layers = group_layers,
             .unused_frames = 0,
         };
         for (u32 level = 0; level < levels; ++level) {
@@ -4970,16 +4995,16 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
         }
     }
-    astc_decoder_pass->AssembleInto(
-        info, 0, image.guest_size_bytes,
-        ASTCDecoderPass::Target{
-            .image = *pending.image,
-            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .initialized = false,
-            .level_view = [&pending](s32 level) { return *pending.views[level]; },
-            .wait = true,
-        },
-        map, swizzles);
+    if (grouped && pending.layer_views.empty()) {
+        for (u32 level = 0; level < levels; ++level) {
+            for (u32 layer = 0; layer < group_layers; ++layer) {
+                pending.layer_views.push_back(MakeStorageView(
+                    device.GetLogical(), level, *pending.image, DecodeFormat, layer, 1));
+            }
+        }
+    }
+    std::vector<u32> group_indices(grouped ? group_layers : 0);
+    std::iota(group_indices.begin(), group_indices.end(), 0U);
 
     // Encode every level into one buffer, then copy it into the image.
     const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
@@ -5009,10 +5034,32 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         total += size;
     }
     const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
-    for (u32 level = 0; level < levels; ++level) {
-        bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
-                                copies[level].image_extent.height, layers, bc3, output.buffer,
-                                output.offset, total, copies[level].buffer_offset);
+    for (u32 first = 0; first < layers; first += group_layers) {
+        const u32 count = (std::min)(group_layers, layers - first);
+        StagingBufferRef group_map = map;
+        group_map.offset += u64{first} * info.layer_stride;
+        astc_decoder_pass->AssembleInto(
+            info, 0, image.guest_size_bytes,
+            ASTCDecoderPass::Target{
+                .image = *pending.image,
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .initialized = first != 0,
+                .level_view = [&pending](s32 level) { return *pending.views[level]; },
+                .wait = false,
+                .layers = std::span<const u32>{group_indices}.first(grouped ? count : 0),
+                .layer_view = [&pending](s32 level, u32 layer) {
+                    return *pending.layer_views[level * pending.layers + layer];
+                },
+            },
+            group_map, swizzles);
+        for (u32 level = 0; level < levels; ++level) {
+            const VideoCommon::BufferImageCopy& copy = copies[level];
+            const u64 layer_size = copy.buffer_size / layers;
+            bc_encoder_pass->Encode(*pending.views[level], copy.image_extent.width,
+                                    copy.image_extent.height, count, bc3, output.buffer,
+                                    output.offset, total,
+                                    copy.buffer_offset + first * layer_size);
+        }
     }
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         const VkMemoryBarrier barrier{
@@ -5027,6 +5074,24 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     image.UploadMemory(output.buffer, output.offset, copies);
     pending.tick = scheduler.CurrentTick();
     pending_transcodes.push_back(std::move(pending));
+    scheduler.Flush();
+
+    // A loading screen transcodes hundreds of textures before the frame ends, and each decode
+    // image is 4 to 8 times its BC texture: title 1's gameplay start held 5.5 GB of them.
+    // Wait only here, after this upload's commands: waiting earlier could free its staging
+    // buffer for reuse before the decode reads it.
+    static constexpr u64 MaxPendingTranscodeBytes = u64{256} << 20;
+    const auto pending_bytes = [this] {
+        u64 bytes{};
+        for (const PendingTranscode& t : pending_transcodes) {
+            bytes += t.DecodeBytes();
+        }
+        return bytes;
+    };
+    while (pending_bytes() > MaxPendingTranscodeBytes) {
+        scheduler.Wait(pending_transcodes.front().tick);
+        ReleaseFinishedTranscodes();
+    }
 }
 
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {

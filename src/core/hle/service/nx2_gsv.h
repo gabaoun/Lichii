@@ -385,6 +385,7 @@ public:
     ~INx2GpuSession() override {
         // Waits for a backing the GPU thread may be doing.
         Tegra::Nx2SetSparseBacking({});
+        FreeReleasedRegionsAtExit();
         for (auto* event : m_events) {
             if (event != nullptr) {
                 m_context.CloseEvent(event);
@@ -792,11 +793,12 @@ private:
         return true;
     }
 
-    // Returns the pages of destroyed regions the GPU thread is done with to the kernel.
-    void FreeReleasedRegions() {
+    // Returns the pages of destroyed regions the GPU thread is done with to the kernel; with
+    // `force`, also those it may not be done with yet.
+    void FreeReleasedRegions(bool force = false) {
         auto* const process = system.ApplicationProcess();
         std::erase_if(m_released_regions, [&](ReleasedRegion& released) {
-            if (!released.done->load(std::memory_order_acquire)) {
+            if (!force && !released.done->load(std::memory_order_acquire)) {
                 return false;
             }
             auto& region = released.region;
@@ -811,6 +813,53 @@ private:
             m_gpu_only_bytes -= region.size;
             return true;
         });
+    }
+
+    // Session teardown: waits (bounded) for the GPU thread to pass the released regions, then
+    // frees them all. When emulation stops, the GPU thread is stopped before the services close
+    // and never gets there; their pages are freed anyway rather than lost.
+    void FreeReleasedRegionsAtExit() {
+        {
+            std::scoped_lock lk{m_region_mutex};
+            FreeReleasedRegions();
+            if (m_released_regions.empty()) {
+                return;
+            }
+        }
+        if (system.IsPoweredOn()) {
+            struct Wake {
+                std::mutex mutex;
+                std::condition_variable cv;
+                bool done{};
+            };
+            auto wake = std::make_shared<Wake>();
+            // Queued after the RunInOrder that set each pending `done`, so it runs after them.
+            system.GPU().RunInOrder([wake] {
+                {
+                    std::scoped_lock lk{wake->mutex};
+                    wake->done = true;
+                }
+                wake->cv.notify_all();
+            });
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            std::unique_lock lk{wake->mutex};
+            while (!wake->done && system.IsPoweredOn()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    break;
+                }
+                wake->cv.wait_for(lk, (std::min<std::chrono::steady_clock::duration>)(
+                                          deadline - now, std::chrono::milliseconds{50}));
+            }
+        }
+        std::scoped_lock lk{m_region_mutex};
+        FreeReleasedRegions();
+        if (!m_released_regions.empty()) {
+            LOG_WARNING(Service, "nx2:gpu freeing {} released GPU-only backings the GPU thread has "
+                                 "not passed",
+                        m_released_regions.size());
+            FreeReleasedRegions(true);
+        }
     }
 
     struct MappedBacking {
@@ -3064,16 +3113,59 @@ private:
         return static_cast<u32>(syncpoints.GetGuestSyncpointValue(m_syncpoint));
     }
 
-    // Waits (bounded) until the client's reads of an image it gave back have passed.
+    // Waits (bounded) until the client's reads of an image it gave back have passed. Runs on the
+    // decode thread without m_mutex. A release more than 500 ms late means the client's GPU work
+    // is stalled (the decoder only runs MaxDecodedAhead frames ahead), so the frame goes out.
     void WaitForRelease(const Fence& fence) {
         if (fence.syncpoint >= HostSyncpoints) {
             return;
         }
         auto& syncpoints = system.Host1x().GetSyncpointManager();
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{100};
-        while (!syncpoints.IsReadyGuest(fence.syncpoint, fence.value) &&
-               std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        if (!syncpoints.IsReadyGuest(fence.syncpoint, fence.value)) {
+            struct Wake {
+                std::mutex mutex;
+                std::condition_variable cv;
+                bool done{};
+            };
+            auto wake = std::make_shared<Wake>();
+            // Runs inline if the value was reached meanwhile, else on the incrementing thread.
+            const auto handle =
+                syncpoints.RegisterGuestAction(fence.syncpoint, fence.value, [wake] {
+                    {
+                        std::scoped_lock lk{wake->mutex};
+                        wake->done = true;
+                    }
+                    wake->cv.notify_all();
+                });
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
+            bool done = false;
+            while (true) {
+                {
+                    std::unique_lock lk{wake->mutex};
+                    done = wake->cv.wait_for(lk, std::chrono::milliseconds{10},
+                                             [&] { return wake->done; });
+                }
+                // m_mutex is not taken under wake->mutex: actions run under the syncpoint
+                // manager's lock, which the service thread takes under m_mutex.
+                if (done || std::chrono::steady_clock::now() >= deadline || !system.IsPoweredOn()) {
+                    break;
+                }
+                std::scoped_lock lk{m_mutex};
+                if (m_quit) {
+                    break;
+                }
+            }
+            if (!done) {
+                syncpoints.DeregisterGuestAction(fence.syncpoint, handle);
+                static std::atomic<u32> timeouts{};
+                if (!syncpoints.IsReadyGuest(fence.syncpoint, fence.value) &&
+                    (timeouts.fetch_add(1, std::memory_order_relaxed) % 64) == 0) {
+                    LOG_WARNING(Service, "{} gave up waiting for image release ({}, {}), current "
+                                         "value={}",
+                                GetServiceName(), fence.syncpoint, fence.value,
+                                syncpoints.GetGuestSyncpointValue(fence.syncpoint));
+                }
+            }
         }
         if (Nx2VideoTraceEnabled()) {
             LOG_INFO(Service, "nx2:vdec trace release wait syncpoint={} value={} reached={}",

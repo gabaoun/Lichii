@@ -227,11 +227,12 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
     VkImage handle{};
     VmaAllocation allocation{};
     VmaAllocationInfo alloc_info{};
-    // Images this large (title 1's sparse texture arrays reach 4.5G texels, ~23 GB) are never
-    // backed: VMA would quietly place them in system memory once VRAM is full. They take the
-    // unbacked sparse fallback below.
+    // On sparse-capable devices, images this large (title 1's arrays reach 4.5G texels, ~23 GB)
+    // are never backed: VMA would quietly place them in system memory once VRAM is full.
+    // They take the unbacked sparse fallback below.
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
-    const bool huge = texels > (u64{1} << 28);
+    const bool huge = texels > (u64{1} << 28) && ci.samples == VK_SAMPLE_COUNT_1_BIT &&
+                      device.IsSparseResidencyImageSupported(ci.imageType);
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
@@ -282,6 +283,21 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
                         ci.arrayLayers, static_cast<u32>(ci.format));
             return sparse;
         }
+        VkImageCreateInfo scaled_ci = ci;
+        while (scaled_ci.extent.width > 512 || scaled_ci.extent.height > 512) {
+            scaled_ci.extent.width = (std::max)(1u, scaled_ci.extent.width / 2);
+            scaled_ci.extent.height = (std::max)(1u, scaled_ci.extent.height / 2);
+            VmaAllocationCreateInfo relaxed = alloc_ci;
+            relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateImage(allocator, &scaled_ci, &relaxed, &handle, &allocation, &alloc_info);
+            if (result == VK_SUCCESS) {
+                LOG_WARNING(Render_Vulkan,
+                            "Image {}x{}x{} (format {}) does not fit; scaled to {}x{} (result VK_SUCCESS)",
+                            ci.extent.width, ci.extent.height, ci.extent.depth,
+                            static_cast<u32>(ci.format), scaled_ci.extent.width, scaled_ci.extent.height);
+                break;
+            }
+        }
     }
     if (result != VK_SUCCESS) {
         LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",
@@ -305,7 +321,8 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased) const {
-    if (ci.imageType == VK_IMAGE_TYPE_1D) {
+    if (ci.imageType == VK_IMAGE_TYPE_1D || ci.samples != VK_SAMPLE_COUNT_1_BIT ||
+        !device.IsSparseResidencyImageSupported(ci.imageType)) {
         return vk::Image{};
     }
     VkImageCreateInfo sparse_ci = ci;

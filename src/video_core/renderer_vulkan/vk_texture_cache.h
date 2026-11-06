@@ -292,12 +292,17 @@ public:
         u64 tick;
         vk::Image image;
         std::vector<vk::ImageView> views;
+        /// Per level, then per layer: only for an array decoded a group of layers at a time.
+        std::vector<vk::ImageView> layer_views;
         u32 width;
         u32 height;
         u32 levels;
         u32 layers;
         u32 unused_frames;
+
+        u64 DecodeBytes() const;
     };
+    void ReleaseFinishedTranscodes();
     std::deque<PendingTranscode> pending_transcodes;
     /// Decode images the GPU is done with, for the next texture of the same shape.
     std::vector<PendingTranscode> free_transcodes;
@@ -839,6 +844,7 @@ private:
         bool drop_reduction;
         bool drop_custom_border;
         bool srgb_border;
+        bool drop_compare;
         std::array<VkComponentSwizzle, 4> swizzle;
 
         bool operator==(const VariantKey&) const noexcept = default;
