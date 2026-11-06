@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload to (default: v1.1-custom)"
+        description: "Release tag to upload to (default: v1.2-custom)"
         type: string
-        default: "v1.1-custom"
+        default: "v1.2-custom"
   push:
     branches:
       - nx2-custom
@@ -120,7 +120,7 @@ jobs:
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export EXTRA_QT_MODULES=waylandcompositor
           export EXTRA_PLATFORM_PLUGINS='libqwayland-egl.so;libqwayland-generic.so'
-          export LDAI_VERSION="v1.1-custom-${GITHUB_SHA::7}"
+          export LDAI_VERSION="v1.2-custom-${GITHUB_SHA::7}"
           export LDAI_OUTPUT="Lichii-Linux-x86_64.AppImage"
           export OUTPUT="$LDAI_OUTPUT"
           export ARCH="$arch"
@@ -150,7 +150,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.release_tag || 'v1.1-custom' }}"
+          tag="${{ github.event.inputs.release_tag || 'v1.2-custom' }}"
           echo "Uploading Linux AppImage to release $tag..."
           gh release upload "$tag" Lichii-Linux-x86_64.AppImage Lichii-Linux-x86_64.tar.gz \
             --repo "${GITHUB_REPOSITORY}" \
