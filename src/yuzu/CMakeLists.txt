@@ -487,14 +487,8 @@ endif()
 target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
 if (MSVC AND CXX_CLANG)
-    # The bundled Qt is built with a newer MSVC STL. link.exe drops the unused Qt functions that
-    # call these helpers before resolving them; lld-link does not, so they point at a trap.
-    target_sources(yuzu PRIVATE msvc_stl_trap.cpp)
-    set_source_files_properties(msvc_stl_trap.cpp PROPERTIES COMPILE_OPTIONS /clang:-fno-lto)
-    foreach(helper __std_minmax_element_2u __std_replace_copy_1 __std_replace_copy_2
-                   __std_rotate __std_unique_4 __std_unique_8)
-        target_link_options(yuzu PRIVATE /alternatename:${helper}=lichii_missing_msvc_stl_helper)
-    endforeach()
+    # The bundled Qt is built with a newer MSVC STL than VS 2022's.
+    target_sources(yuzu PRIVATE msvc_stl_compat.cpp)
 endif()
 
 create_target_directory_groups(yuzu)
