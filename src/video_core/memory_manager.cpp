@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -430,7 +429,8 @@ inline void MemoryManager::MemoryOperation(GPUVAddr gpu_src_addr, std::size_t si
     }
 }
 
-void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) const {
+void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe,
+                                  std::source_location caller) const {
     if (!IsWithinGPUAddressRange(gpu_src_addr) || size > address_space_size - gpu_src_addr) {
         std::memset(dest_buffer, 0, size);
         return;
@@ -464,7 +464,7 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         if (physical != nullptr) [[likely]] {
             std::memcpy(dest_buffer, physical, copy_amount);
         } else {
-            memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
+            memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount, caller);
         }
         dest_buffer = static_cast<u8*>(dest_buffer) + copy_amount;
     };
@@ -475,11 +475,13 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
     MemoryOperation(gpu_src_addr, size, true, mapped_big, set_to_zero, read_short_pages);
 }
 
-void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
-    ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
+void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which,
+                              std::source_location caller) const {
+    ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false, caller);
 }
 
-void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, const std::size_t size) const {
+void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, const std::size_t size,
+                                    std::source_location caller) const {
     // Small reads within one 4 KiB page (texture and sampler descriptors, several per draw): one
     // translation and a copy, as Read<T> does, instead of the page walk (~3% of the GPU thread
     // in title 1). Anything else, unmapped or sparse pages included, takes the full path.
@@ -490,10 +492,11 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
             return;
         }
     }
-    ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
+    ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true, caller);
 }
 
-void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count) const {
+void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count,
+                                    std::source_location caller) const {
     const std::size_t size = count * sizeof(u32);
     const auto shim = native_syncpoint_shim.load(std::memory_order_acquire);
     if (shim && gpu_src_addr < shim + NumShimSyncpoints * sizeof(u32) && gpu_src_addr + size > shim) {
@@ -502,7 +505,7 @@ void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_
         }
         return;
     }
-    ReadBlockUnsafe(gpu_src_addr, dest, size);
+    ReadBlockUnsafe(gpu_src_addr, dest, size, caller);
 }
 
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {
@@ -630,24 +633,8 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
-    // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 to ~220,000 times a
-    // second in Ocarina's Kokiri village: keep answers per thread in a 4096-entry direct cache
-    // until the page table changes (PR #670, +20% fps).
-    struct Entry {
-        size_t owner;
-        GPUVAddr gpu_addr;
-        size_t size;
-        u64 serial;
-        size_t result;
-    };
-    thread_local std::vector<Entry> cache(4096);
-    const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 52];
-    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
-        entry.serial == serial) {
-        return entry.result;
-    }
-
+    // Native storage buffers ask this for up to 8 MiB on each bind, ~90,000 times a second in
+    // Ocarina's Kokiri village: answer from the runs kept at map time instead of walking pages.
     size_t result = 0;
     if (IsWithinGPUAddressRange(gpu_addr) && size <= address_space_size - gpu_addr) {
         const auto& runs = CurrentSnapshot().runs;
@@ -666,9 +653,8 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
                       "Nx2Perf mapping runs: MaxContinuousRange({:#x}, {:#x}) = {:#x}, walk {:#x}",
                       gpu_addr, size, result, expected);
         }
-        result = expected;
+        return expected;
     }
-    entry = {unique_identifier + 1, gpu_addr, size, serial, result};
     return result;
 }
 
