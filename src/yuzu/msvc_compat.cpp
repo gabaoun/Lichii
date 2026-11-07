@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #ifdef _MSC_VER
+#include <yvals_core.h>
+#endif
+// STL 14.5 and newer ship these helpers itself.
+#if defined(_MSC_VER) && _MSVC_STL_VERSION < 145
 #include <algorithm>
 #include <cstdint>
 #include <utility>
