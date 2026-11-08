@@ -32,7 +32,8 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
+    // Dref image instructions need a float Sampled Type, even for a texture also marked integer.
+    const Id type{desc.is_depth ? ctx.F32[1] : desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
     const bool depth{desc.is_depth};
     const bool ms{desc.is_multisample};
     switch (desc.type) {

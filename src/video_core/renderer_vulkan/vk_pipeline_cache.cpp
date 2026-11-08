@@ -1039,7 +1039,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                  std::vector<FileEnvironment> candidates) {
         workers.QueueWork([this, key, envs_ = std::move(candidates), &state,
                            &callback]() mutable {
-            ShaderPools pools;
+            thread_local ShaderPools pools;
             ComputePipelineCacheEntry entry;
             for (auto& env : envs_) {
                 pools.ReleaseContents();
@@ -1115,7 +1115,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 capture_bytes <= PrecacheCaptureLimit - precache_capture_bytes) {
                 precache_capture_bytes += capture_bytes;
                 precache_graphics.push_back({hash, [this, key, envs = std::move(envs)]() mutable {
-                    ShaderPools pools;
+                    thread_local ShaderPools pools;
+                    pools.ReleaseContents();
                     boost::container::static_vector<Shader::Environment*,
                                                     Maxwell::MaxShaderProgram>
                         env_ptrs;
@@ -1130,7 +1131,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             if (background_pipelines.Add(
                     key, capture_bytes, [this, key, envs = std::move(envs)]() mutable {
-                        ShaderPools pools;
+                        thread_local ShaderPools pools;
+                        pools.ReleaseContents();
                         boost::container::static_vector<Shader::Environment*,
                                                         Maxwell::MaxShaderProgram>
                             env_ptrs;
@@ -1151,7 +1153,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         ++queued_graphics;
 
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            pools.ReleaseContents();
             boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
